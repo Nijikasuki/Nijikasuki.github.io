@@ -1,0 +1,133 @@
+/* 引入手写字体 Pacifico */
+@import url('https://fonts.googleapis.com/css2?family=Pacifico&display=swap');
+
+/* 隐藏首页 home_top 下方的 4 个推荐缩略图 */
+#topPostGroup {
+  display: none !important;
+}
+
+/* 让右侧撑满 340px：上面 swiper、下面 hello 卡 */
+#swiper_container_blog {
+  height: 340px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 1rem !important;
+}
+
+/* hello 卡：粉紫渐变卡片 */
+#hello-card {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: linear-gradient(135deg, #ffe1f0 0%, #ece0fb 100%);
+  border-radius: 12px;
+  padding: 12px 14px 12px 22px;
+  overflow: hidden;
+  box-shadow: 0 4px 14px rgba(241, 128, 204, 0.15);
+  transition: all 0.3s;
+}
+#hello-card:hover {
+  box-shadow: 0 6px 20px rgba(241, 128, 204, 0.28);
+  transform: translateY(-2px);
+}
+
+/* 左侧：信息文字 */
+.hello-info {
+  flex: 1;
+  position: relative;
+  z-index: 2;
+  font-size: 13px;
+  color: #774488;
+  font-weight: 500;
+  line-height: 1.7;
+  min-width: 0;
+}
+.hello-info-line {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 右侧：气泡 + GIF 组合（紧贴在一起） */
+.hello-character-group {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  position: relative;
+  z-index: 2;
+}
+
+/* 对话气泡 */
+.hello-bubble {
+  position: relative;
+  display: inline-block;
+  background: #ffffff;
+  border: 2px solid #f180cc;
+  border-radius: 20px;
+  padding: 6px 18px;
+  font-family: 'Pacifico', cursive;
+  font-size: 24px;
+  color: #f180cc;
+  box-shadow: 0 4px 10px rgba(241, 128, 204, 0.2);
+  white-space: nowrap;
+  margin-right: -2px;        /* 尾巴尖戳到角色 */
+}
+.hello-bubble::after {
+  content: '';
+  position: absolute;
+  right: -12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 0; height: 0;
+  border-top: 8px solid transparent;
+  border-bottom: 8px solid transparent;
+  border-left: 12px solid #f180cc;
+}
+.hello-bubble::before {
+  content: '';
+  position: absolute;
+  right: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 0; height: 0;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+  border-left: 9px solid #ffffff;
+  z-index: 1;
+}
+.hello-bubble-text {
+  display: inline-block;
+  transition: opacity 0.25s ease;
+}
+.hello-bubble-text.fading { opacity: 0; }
+
+/* 角色 GIF */
+.hello-gif {
+  flex-shrink: 0;
+  height: 110px;
+  width: auto;
+  pointer-events: none;
+}
+
+/* 装饰：飘浮的小符号 */
+.hello-deco {
+  position: absolute;
+  pointer-events: none;
+  user-select: none;
+  z-index: 1;
+  animation: hello-float 4s ease-in-out infinite;
+}
+.hello-deco-1 { top: 12%;  left: 50%; font-size: 16px; color: #f180cc; animation-delay: 0s;   }
+.hello-deco-2 { top: 70%;  left: 45%; font-size: 13px; color: #b985ff; animation-delay: 1.2s; }
+.hello-deco-3 { top: 28%;  right: 4%; font-size: 14px; color: #f180cc; animation-delay: 2.0s; }
+.hello-deco-4 { bottom: 10%; left: 38%; font-size: 12px; color: #b985ff; animation-delay: 0.6s; }
+
+@keyframes hello-float {
+  0%, 100% { transform: translateY(0)    rotate(-6deg); opacity: 0.55; }
+  50%      { transform: translateY(-8px) rotate(8deg);  opacity: 1;    }
+}
