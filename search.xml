@@ -4,6 +4,37 @@
   
     
     <entry>
+      <title>无状态认证：JWT 在 Spring Security 中的完整链路</title>
+      <link href="/2026/06/21/%E6%97%A0%E7%8A%B6%E6%80%81%E8%AE%A4%E8%AF%81%EF%BC%9AJWT-%E5%9C%A8-Spring-Security-%E4%B8%AD%E7%9A%84%E5%AE%8C%E6%95%B4%E9%93%BE%E8%B7%AF/"/>
+      <url>/2026/06/21/%E6%97%A0%E7%8A%B6%E6%80%81%E8%AE%A4%E8%AF%81%EF%BC%9AJWT-%E5%9C%A8-Spring-Security-%E4%B8%AD%E7%9A%84%E5%AE%8C%E6%95%B4%E9%93%BE%E8%B7%AF/</url>
+      
+        <content type="html"><![CDATA[<h2 id="0-开篇：要解决什么问题"><a href="#0-开篇：要解决什么问题" class="headerlink" title="0. 开篇：要解决什么问题"></a>0. 开篇：要解决什么问题</h2><p>HTTP是无状态的请求，假设一个网站是一个需要登录才可以访问信息的网站并且用户的账号密码已经保存在数据库中，用户连续发送两次请求，一次是登录请求，一次是访问内容的请求(用户个人信息),假如第一次登录请求能够成功，第二次请求还是无法得到用户信息，因为服务器不知道第二次请求是谁发的，所以也无法获取用户信息。</p><p>为了解决这个问题，有两种思路:</p><ol><li>Session:用户登录成功后，服务器会创建Session保存在内存(Redis)，假设SessionID &#x3D; test，则这个SessionID会对应一个UserId，通过Cookie返回(Set-Cookie: JSESSIONID&#x3D;abc123),返回后由浏览器保存，随后的每次请求都会带有这个Cookie，服务器根据这个SessionID来判断用户</li><li>JWT:用户登录成功后，服务器会用UserId创建一个Token返回给客户端，客户端通过自带Token即可进行访问</li></ol><p><strong>Session vs JWT 对比：</strong></p><table><thead><tr><th></th><th>Session</th><th>JWT</th></tr></thead><tbody><tr><td>状态存在哪</td><td>服务器内存 &#x2F; Redis</td><td>客户端（token 自带）</td></tr><tr><td>服务器压力</td><td>需要存储和查询</td><td>零存储，只做验签</td></tr><tr><td>主动失效</td><td>直接删 SessionID 即可</td><td>无法主动失效，只能等过期</td></tr><tr><td>水平扩展</td><td>多实例需共享 Session（Redis）</td><td>无状态，天然支持多实例</td></tr><tr><td>安全凭证传输</td><td>Cookie 自动携带</td><td>通常放 Authorization 请求头</td></tr></tbody></table><p><strong>token 放哪：Authorization Header vs Cookie 对比：</strong></p><table><thead><tr><th></th><th>Authorization Header</th><th>Cookie</th></tr></thead><tbody><tr><td>携带方式</td><td>前端手动设置，不自动携带</td><td>浏览器自动携带</td></tr><tr><td>CSRF 风险</td><td>无（浏览器不自动带请求头）</td><td>有（浏览器自动带 Cookie）</td></tr><tr><td>XSS 风险</td><td>高（JS 可读取 localStorage）</td><td>可设 HttpOnly 防 JS 读取</td></tr><tr><td>适用场景</td><td>前后端分离 API</td><td>传统 Web &#x2F; 需要 HttpOnly 保护</td></tr></tbody></table><p>本文分两层：① JWT 本身是什么（脱离 Spring 也成立）→ ② 它怎么嵌进 Spring Security 过滤器链。</p><hr><h2 id="第一层：JWT-本身"><a href="#第一层：JWT-本身" class="headerlink" title="第一层：JWT 本身"></a>第一层：JWT 本身</h2><h3 id="1-1-它长什么样——header-payload-signature-三段"><a href="#1-1-它长什么样——header-payload-signature-三段" class="headerlink" title="1.1 它长什么样——header.payload.signature 三段"></a>1.1 它长什么样——header.payload.signature 三段</h3><p>用户登录成功之后，服务器端会生成Token，Token的三段分别为header.payload.signature</p><p>header:存token的元信息，包含用于签名的的算法，token类型<br>payload:以 base64 编码存储，是明文可读的，不能用于存放用户密码，可以存放UserId用于判断用户<br>signature: header + payload 用服务器上保存的密钥做一次 HMAC 运算，得到 signature，验证时服务器拿同一把密钥对收到的 header + payload 重新算一遍，结果和 signature 对上了就说明没被篡改。</p><h3 id="1-2-签发——JwtUtil-generateToken"><a href="#1-2-签发——JwtUtil-generateToken" class="headerlink" title="1.2 签发——JwtUtil.generateToken"></a>1.2 签发——JwtUtil.generateToken</h3><p>服务器通过保存在配置文件上的key来进行签名，为了保证隐私安全，所以secret最好不要硬编码，一旦泄露，攻击者可以通过改动payload生成正确的签名从而获取信息。</p><p>签发时，payload 里除了 <code>subject</code>（userId）之外，还会写入两个时间字段：</p><ul><li><code>iat</code>（issuedAt）：签发时间，即当前时间 <code>now</code></li><li><code>exp</code>（expiration）：过期时间，即 <code>now + EXPIRE_MS</code></li></ul><p>这两个字段同样是 base64 明文，<strong>直接存在 payload 里</strong>，不需要服务器另存——这是 JWT 无状态的关键之一。</p><figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br></pre></td><td class="code"><pre><span class="line"><span class="meta">@Component</span></span><br><span class="line"><span class="keyword">public</span> <span class="keyword">class</span> <span class="title class_">JwtUtil</span> &#123;</span><br><span class="line"></span><br><span class="line">    <span class="comment">// ⭐ 从 application.yaml 的 jwt.secret 读, 外部化避免硬编码泄漏</span></span><br><span class="line">    <span class="meta">@Value(&quot;$&#123;jwt.secret&#125;&quot;)</span></span><br><span class="line">    <span class="keyword">private</span> String secret;</span><br><span class="line"></span><br><span class="line">    <span class="keyword">private</span> SecretKey key;</span><br><span class="line"></span><br><span class="line">    <span class="comment">// 注入完成后初始化 key (因为 @Value 在构造后才生效)</span></span><br><span class="line">    <span class="meta">@PostConstruct</span></span><br><span class="line">    <span class="keyword">public</span> <span class="keyword">void</span> <span class="title function_">init</span><span class="params">()</span> &#123;</span><br><span class="line">        <span class="built_in">this</span>.key = Keys.hmacShaKeyFor(secret.getBytes());</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="comment">// token 有效期：这里设 24 小时（学习方便；真实项目常更短 + 配刷新机制）</span></span><br><span class="line">    <span class="keyword">private</span> <span class="keyword">static</span> <span class="keyword">final</span> <span class="type">long</span> <span class="variable">EXPIRE_MS</span> <span class="operator">=</span> <span class="number">24</span> * <span class="number">60</span> * <span class="number">60</span> * <span class="number">1000L</span>;</span><br><span class="line"></span><br><span class="line">    <span class="comment">// 签发：把 userId 装进 token，签名，返回 &quot;xxx.yyy.zzz&quot; 字符串</span></span><br><span class="line">    <span class="keyword">public</span> String <span class="title function_">generateToken</span><span class="params">(Long userId)</span> &#123;</span><br><span class="line">        <span class="type">Date</span> <span class="variable">now</span> <span class="operator">=</span> <span class="keyword">new</span> <span class="title class_">Date</span>();</span><br><span class="line">        <span class="keyword">return</span> Jwts.builder()</span><br><span class="line">                .subject(String.valueOf(userId))              <span class="comment">// 载荷里放 userId（subject 标准字段）</span></span><br><span class="line">                .issuedAt(now)                                <span class="comment">// 签发时间</span></span><br><span class="line">                .expiration(<span class="keyword">new</span> <span class="title class_">Date</span>(now.getTime() + EXPIRE_MS)) <span class="comment">// 过期时间</span></span><br><span class="line">                .signWith(key)                                <span class="comment">// 用服务器密钥签名（第三段）</span></span><br><span class="line">                .compact();                                   <span class="comment">// 拼成最终字符串</span></span><br><span class="line">    &#125;</span><br></pre></td></tr></table></figure><h3 id="1-3-验签——JwtUtil-parseUserId"><a href="#1-3-验签——JwtUtil-parseUserId" class="headerlink" title="1.3 验签——JwtUtil.parseUserId"></a>1.3 验签——JwtUtil.parseUserId</h3><p>相比于Session，JWT是无状态的，因为服务器不存内容，服务器只负责验证签名，正因如此，假设管理员需要封号或者让用户注销登录，session只需要删除记录即可，但JWT不行。</p><p><code>parseSignedClaims</code> 在解析时会自动做两件事：</p><ol><li><strong>验签</strong>：用同一把密钥重新计算 signature，对不上就抛异常</li><li><strong>验过期</strong>：读取 payload 里的 <code>exp</code> 字段，和当前时间对比，过期也抛异常</li></ol><p>服务器全程不查任何存储，只做数学运算——这就是”无状态”的本质。</p><figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">// 解析+验签：合法则返回里面的 userId；被篡改/过期/伪造会抛异常（上层处理）</span></span><br><span class="line"><span class="keyword">public</span> Long <span class="title function_">parseUserId</span><span class="params">(String token)</span> &#123;</span><br><span class="line">    <span class="type">Claims</span> <span class="variable">claims</span> <span class="operator">=</span> Jwts.parser()</span><br><span class="line">            .verifyWith(key)            <span class="comment">// 用同一把密钥验签——签名对不上这里就抛异常</span></span><br><span class="line">            .build()</span><br><span class="line">            .parseSignedClaims(token)   <span class="comment">// 解析；过期也会在这抛异常</span></span><br><span class="line">            .getPayload();              <span class="comment">// 拿到载荷</span></span><br><span class="line">    <span class="keyword">return</span> Long.valueOf(claims.getSubject());  <span class="comment">// 取出当初放进去的 userId</span></span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure><hr><h2 id="第二层：嵌进-Spring-Security"><a href="#第二层：嵌进-Spring-Security" class="headerlink" title="第二层：嵌进 Spring Security"></a>第二层：嵌进 Spring Security</h2><h3 id="2-1-认证（Authentication）vs-授权（Authorization）"><a href="#2-1-认证（Authentication）vs-授权（Authorization）" class="headerlink" title="2.1 认证（Authentication）vs 授权（Authorization）"></a>2.1 认证（Authentication）vs 授权（Authorization）</h3><p>认证：用于登录，判断用户是谁<br>授权：判断用户能否访问这个接口(比如游客用户可以访问部分授权内容，但部分功能需要登录后才能授权使用)</p><h3 id="2-2-过滤器——JwtAuthenticationFilter"><a href="#2-2-过滤器——JwtAuthenticationFilter" class="headerlink" title="2.2 过滤器——JwtAuthenticationFilter"></a>2.2 过滤器——JwtAuthenticationFilter</h3><p>这一层主要用于认证，所以这个Filter的职责为登记身份，假如能够正确认证，则把UserId写入SecurityContext，如果token失效则当作游客后继续放行</p><p>SecurityContextHolder本质是一个“线程级别的用户上下文容器”，默认基于 ThreadLocal 存储当前请求的认证信息(Authentication),ThreadLocal——每个线程有自己独立的一份存储，线程之间完全隔离。一个请求对应一个线程，所以请求之间不会互相干扰。</p><p>filter 把身份存进去，后面的 controller 就能通过 @AuthenticationPrincipal 直接取出来</p><p>SecurityConfig代码中，把JWT 过滤器插入到 Spring 默认“UsernamePasswordAuthenticationFilter”之前执行的原因：Spring 默认是“Session 登录体系”，我们做的是在 Spring “认为你未登录之前”，先帮它识别 JWT</p><figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br><span class="line">47</span><br><span class="line">48</span><br><span class="line">49</span><br><span class="line">50</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">import</span> jakarta.servlet.FilterChain;</span><br><span class="line"><span class="keyword">import</span> jakarta.servlet.ServletException;</span><br><span class="line"><span class="keyword">import</span> jakarta.servlet.http.HttpServletRequest;</span><br><span class="line"><span class="keyword">import</span> jakarta.servlet.http.HttpServletResponse;</span><br><span class="line"><span class="keyword">import</span> org.springframework.security.authentication.UsernamePasswordAuthenticationToken;</span><br><span class="line"><span class="keyword">import</span> org.springframework.security.core.context.SecurityContextHolder;</span><br><span class="line"><span class="keyword">import</span> org.springframework.stereotype.Component;</span><br><span class="line"><span class="keyword">import</span> org.springframework.web.filter.OncePerRequestFilter;</span><br><span class="line"></span><br><span class="line"><span class="keyword">import</span> java.io.IOException;</span><br><span class="line"><span class="keyword">import</span> java.util.Collections;</span><br><span class="line"></span><br><span class="line"><span class="comment">// 职责：验 token → 把&quot;你是谁&quot;登记进 SecurityContext。它【不】决定放行/拦截</span></span><br><span class="line"><span class="comment">// extends OncePerRequestFilter：Spring 提供的过滤器基类，保证每个请求只过一次</span></span><br><span class="line"><span class="meta">@Component</span></span><br><span class="line"><span class="keyword">public</span> <span class="keyword">class</span> <span class="title class_">JwtAuthenticationFilter</span> <span class="keyword">extends</span> <span class="title class_">OncePerRequestFilter</span> &#123;</span><br><span class="line"></span><br><span class="line">    <span class="keyword">private</span> <span class="keyword">final</span> JwtUtil jwtUtil;</span><br><span class="line"></span><br><span class="line">    <span class="keyword">public</span> <span class="title function_">JwtAuthenticationFilter</span><span class="params">(JwtUtil jwtUtil)</span> &#123;</span><br><span class="line">        <span class="built_in">this</span>.jwtUtil = jwtUtil;</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="meta">@Override</span></span><br><span class="line">    <span class="keyword">protected</span> <span class="keyword">void</span> <span class="title function_">doFilterInternal</span><span class="params">(HttpServletRequest request,</span></span><br><span class="line"><span class="params">                                    HttpServletResponse response,</span></span><br><span class="line"><span class="params">                                    FilterChain filterChain)</span> <span class="keyword">throws</span> ServletException, IOException &#123;</span><br><span class="line">        <span class="comment">// 取 Authorization: Bearer xxx</span></span><br><span class="line">        <span class="type">String</span> <span class="variable">authHeader</span> <span class="operator">=</span> request.getHeader(<span class="string">&quot;Authorization&quot;</span>);</span><br><span class="line">        <span class="keyword">if</span> (authHeader != <span class="literal">null</span> &amp;&amp; authHeader.startsWith(<span class="string">&quot;Bearer &quot;</span>)) &#123;</span><br><span class="line">            <span class="type">String</span> <span class="variable">token</span> <span class="operator">=</span> authHeader.substring(<span class="number">7</span>);</span><br><span class="line">            <span class="keyword">try</span> &#123;</span><br><span class="line">                <span class="type">Long</span> <span class="variable">userId</span> <span class="operator">=</span> jwtUtil.parseUserId(token);   <span class="comment">// 验签，合法则拿到 userId</span></span><br><span class="line"></span><br><span class="line">                <span class="comment">// 造一个 Spring Security 的&quot;已认证&quot;凭证对象</span></span><br><span class="line">                <span class="comment">//   参数：principal(谁=userId)、credentials(密码=null,已用JWT验过)、authorities(权限=暂空)</span></span><br><span class="line">                <span class="comment">//   用这个三参构造 → 该对象被标记为&quot;已认证&quot;</span></span><br><span class="line">                <span class="type">UsernamePasswordAuthenticationToken</span> <span class="variable">authentication</span> <span class="operator">=</span></span><br><span class="line">                        <span class="keyword">new</span> <span class="title class_">UsernamePasswordAuthenticationToken</span>(userId, <span class="literal">null</span>, Collections.emptyList());</span><br><span class="line"></span><br><span class="line">                <span class="comment">// 把身份登记进 SecurityContext —— 这是过滤器的核心动作</span></span><br><span class="line">                SecurityContextHolder.getContext().setAuthentication(authentication);</span><br><span class="line">            &#125; <span class="keyword">catch</span> (Exception e) &#123;</span><br><span class="line">                <span class="comment">// token 无效/过期：不登记身份。不拦、不抛——后续授权规则会因&quot;无身份&quot;而拒</span></span><br><span class="line">            &#125;</span><br><span class="line">        &#125;</span><br><span class="line">        <span class="comment">// 不管认没认证成功，都要放行到过滤器链下一环（拦不拦由授权规则决定，不是这里）</span></span><br><span class="line">        filterChain.doFilter(request, response);</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure><h3 id="2-3-配置——SecurityConfig-securityFilterChain"><a href="#2-3-配置——SecurityConfig-securityFilterChain" class="headerlink" title="2.3 配置——SecurityConfig.securityFilterChain"></a>2.3 配置——SecurityConfig.securityFilterChain</h3><p><strong>cors</strong>：启用 Spring Security 的跨域支持，具体允许的域名和方法由 <code>CorsConfigurationSource</code> Bean 定义。</p><p>**sessionCreationPolicy(STATELESS)**：告诉 Spring Security 不创建、不使用 Session。不设的话 Spring 默认会建 Session，和 JWT 无状态的设计冲突。</p><p>**csrf().disable()**：CSRF（跨站请求伪造）的攻击原理是——你登录了网站 A，浏览器存着 A 的 Cookie（Session），攻击者诱你访问恶意页面，恶意页面偷偷向 A 发请求，浏览器会自动带上 Cookie，服务器以为是你发的。JWT 放在 <code>Authorization</code> 请求头里，浏览器不会自动携带请求头，所以 CSRF 无法利用，可以安全关闭。（注意：如果把 JWT 存进 Cookie，则不能关）</p><p><strong>authorizeHttpRequests 路径规则</strong>：Spring Security 从上到下按顺序匹配，第一条命中的规则生效，所以越精确的规则要放越前面。</p><table><thead><tr><th>规则</th><th>说明</th></tr></thead><tbody><tr><td><code>ASYNC / ERROR</code> dispatcher</td><td>异步请求和错误转发放行，否则 Spring 内部转发会被拦</td></tr><tr><td><code>/api/internal/**</code> → <code>permitAll</code></td><td>服务间调用不走 JWT，认证在 controller 层单独处理</td></tr><tr><td><code>/api/auth/me</code> → <code>authenticated</code></td><td>必须登录才能查自己信息，精确规则先于下面的通配</td></tr><tr><td><code>/api/auth/register</code> → <code>denyAll</code></td><td>注册接口已关闭，直接拒绝所有请求</td></tr><tr><td><code>/api/auth/**</code> → <code>permitAll</code></td><td>登录等认证接口无需 token</td></tr><tr><td><code>/swagger-ui/**</code> 等 → <code>permitAll</code></td><td>开发文档不需要登录</td></tr><tr><td><code>anyRequest</code> → <code>authenticated</code></td><td>其余所有接口必须登录</td></tr></tbody></table><figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line">.authorizeHttpRequests(auth -&gt; auth</span><br><span class="line">        .dispatcherTypeMatchers(DispatcherType.ASYNC, DispatcherType.ERROR).permitAll()</span><br><span class="line">        .requestMatchers(<span class="string">&quot;/api/internal/**&quot;</span>).permitAll()</span><br><span class="line">        .requestMatchers(<span class="string">&quot;/api/auth/me&quot;</span>).authenticated()</span><br><span class="line">        .requestMatchers(<span class="string">&quot;/api/auth/register&quot;</span>).denyAll()</span><br><span class="line">        .requestMatchers(<span class="string">&quot;/api/auth/**&quot;</span>).permitAll()</span><br><span class="line">        .requestMatchers(<span class="string">&quot;/swagger-ui/**&quot;</span>, <span class="string">&quot;/swagger-ui.html&quot;</span>, <span class="string">&quot;/v3/api-docs/**&quot;</span>).permitAll()</span><br><span class="line">        .anyRequest().authenticated()</span><br><span class="line">)</span><br></pre></td></tr></table></figure><h3 id="2-4-失败处理——JwtAuthenticationEntryPoint"><a href="#2-4-失败处理——JwtAuthenticationEntryPoint" class="headerlink" title="2.4 失败处理——JwtAuthenticationEntryPoint"></a>2.4 失败处理——JwtAuthenticationEntryPoint</h3><p>未认证访问受保护接口时，默认行为是返回空响应体，前端收到不知道发生了什么；替换成 Result 信封后前端可以统一按 code 处理。</p><figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">import</span> jakarta.servlet.http.HttpServletRequest;</span><br><span class="line"><span class="keyword">import</span> jakarta.servlet.http.HttpServletResponse;</span><br><span class="line"><span class="keyword">import</span> org.springframework.security.core.AuthenticationException;</span><br><span class="line"><span class="keyword">import</span> org.springframework.security.web.AuthenticationEntryPoint;</span><br><span class="line"><span class="keyword">import</span> org.springframework.stereotype.Component;</span><br><span class="line"><span class="keyword">import</span> tools.jackson.databind.ObjectMapper;</span><br><span class="line"></span><br><span class="line"><span class="keyword">import</span> java.io.IOException;</span><br><span class="line"></span><br><span class="line"><span class="comment">// 认证失败入口：Spring Security 遇到&quot;未认证访问受保护接口&quot;时调用 commence</span></span><br><span class="line"><span class="comment">// 作用：把默认的空 401 换成统一的 Result 信封</span></span><br><span class="line"><span class="meta">@Component</span></span><br><span class="line"><span class="keyword">public</span> <span class="keyword">class</span> <span class="title class_">JwtAuthenticationEntryPoint</span> <span class="keyword">implements</span> <span class="title class_">AuthenticationEntryPoint</span> &#123;</span><br><span class="line"></span><br><span class="line">    <span class="keyword">private</span> <span class="keyword">final</span> ObjectMapper objectMapper;</span><br><span class="line"></span><br><span class="line">    <span class="keyword">public</span> <span class="title function_">JwtAuthenticationEntryPoint</span><span class="params">(ObjectMapper objectMapper)</span> &#123;</span><br><span class="line">        <span class="built_in">this</span>.objectMapper = objectMapper;</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="meta">@Override</span></span><br><span class="line">    <span class="keyword">public</span> <span class="keyword">void</span> <span class="title function_">commence</span><span class="params">(HttpServletRequest request,</span></span><br><span class="line"><span class="params">                         HttpServletResponse response,</span></span><br><span class="line"><span class="params">                         AuthenticationException authException)</span> <span class="keyword">throws</span> IOException &#123;</span><br><span class="line">        response.setContentType(<span class="string">&quot;application/json;charset=UTF-8&quot;</span>);</span><br><span class="line">        response.setStatus(HttpServletResponse.SC_OK);   <span class="comment">// 统一信封风格：HTTP 200，结果看 body.code</span></span><br><span class="line">        Result&lt;Void&gt; body = Result.fail(<span class="number">401</span>, <span class="string">&quot;未登录或 token 无效&quot;</span>);</span><br><span class="line">        response.getWriter().write(objectMapper.writeValueAsString(body));</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure><h3 id="2-5-闭环——-AuthenticationPrincipal-Long-userId"><a href="#2-5-闭环——-AuthenticationPrincipal-Long-userId" class="headerlink" title="2.5 闭环——@AuthenticationPrincipal Long userId"></a>2.5 闭环——@AuthenticationPrincipal Long userId</h3><ol><li>filter 解出 userId，放进 UsernamePasswordAuthenticationToken 的第一个参数（principal）</li><li>把这个 token 存进 SecurityContextHolder</li><li>请求到达 controller 时，Spring 看到 @AuthenticationPrincipal，自动从 SecurityContextHolder 取出 principal，注入进来</li></ol><figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br></pre></td><td class="code"><pre><span class="line"><span class="meta">@GetMapping(&quot;/me&quot;)</span></span><br><span class="line"><span class="meta">@Operation(summary = &quot;当前登录用户信息&quot;, description = &quot;从 token 解析出 userId，返回用户基本信息（不含密码）&quot;)</span></span><br><span class="line"><span class="keyword">public</span> Result&lt;UserResponse&gt; <span class="title function_">me</span><span class="params">(<span class="meta">@AuthenticationPrincipal</span> Long userId)</span> &#123;</span><br><span class="line">    <span class="type">User</span> <span class="variable">dbuser</span> <span class="operator">=</span> service.findById(userId);</span><br><span class="line">    <span class="type">UserResponse</span> <span class="variable">user</span> <span class="operator">=</span> <span class="keyword">new</span> <span class="title class_">UserResponse</span>();</span><br><span class="line">    user.setId(dbuser.getId());</span><br><span class="line">    user.setUsername(dbuser.getUsername());</span><br><span class="line">    user.setCreatedAt(dbuser.getCreatedAt());</span><br><span class="line">    <span class="keyword">return</span> Result.success(user);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure><p><code>@AuthenticationPrincipal</code> 本质是个语法糖——Spring 帮你从 <code>SecurityContextHolder.getContext().getAuthentication().getPrincipal()</code> 里取出值直接注入，省去手动取的样板代码。能答出”userId 从 filter 进 SecurityContext，再由 @AuthenticationPrincipal 注入”，整条链就串通了。</p><hr><h2 id="第三层：进阶"><a href="#第三层：进阶" class="headerlink" title="第三层：进阶"></a>第三层：进阶</h2><h3 id="JWT-的硬伤：签发后无法主动失效"><a href="#JWT-的硬伤：签发后无法主动失效" class="headerlink" title="JWT 的硬伤：签发后无法主动失效"></a>JWT 的硬伤：签发后无法主动失效</h3><p>JWT 无状态的代价是：<strong>服务器签发之后就管不了这个 token 了</strong>。用户注销、管理员封号、用户改密码——这些操作当下都不会让已签发的 token 失效，只能等它自然过期。</p><p>生产环境通常有效期设更短（比如 15 分钟），配合以下方案缓解：</p><ul><li><strong>短有效期 + Refresh Token</strong>：access token 短期（15 分钟），另发一个长期 refresh token，access token 过期后用 refresh token 换新的，注销时只需让 refresh token 失效</li><li><strong>黑名单</strong>：注销时把 token 存进 Redis，每次验签后额外查一下黑名单。代价是重新引入了服务器状态，部分牺牲无状态优势</li></ul><h3 id="token-存哪：localStorage-vs-Cookie"><a href="#token-存哪：localStorage-vs-Cookie" class="headerlink" title="token 存哪：localStorage vs Cookie"></a>token 存哪：localStorage vs Cookie</h3><p>前端拿到 token 之后存在哪，是一个安全权衡：</p><table><thead><tr><th></th><th>localStorage</th><th>HttpOnly Cookie</th></tr></thead><tbody><tr><td>JS 能读取</td><td>能（XSS 可窃取）</td><td>不能（HttpOnly 阻止）</td></tr><tr><td>自动携带</td><td>不会，需手动加请求头</td><td>浏览器自动带，有 CSRF 风险</td></tr><tr><td>推荐场景</td><td>前后端分离，需手动控制</td><td>对 XSS 防护要求高</td></tr></tbody></table><p>前后端分离场景通常 token 存 localStorage，请求时手动加 <code>Authorization: Bearer xxx</code> 请求头——规避了 CSRF，XSS 防护靠前端输入过滤。</p><h3 id="服务间认证：内部接口走独立-Header"><a href="#服务间认证：内部接口走独立-Header" class="headerlink" title="服务间认证：内部接口走独立 Header"></a>服务间认证：内部接口走独立 Header</h3><p>JWT 解决的是<strong>用户和服务器之间的认证</strong>。微服务架构中还存在另一类请求——后端服务之间互相调用的内部接口，这类请求不代表任何用户，不适合走 JWT。</p><p>常见做法：内部接口走独立的自定义请求头（如 <code>X-Internal-Token</code>），在 controller 层手动校验，<code>SecurityConfig</code> 里直接 <code>permitAll</code> 跳过 JWT 认证：</p><figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">// SecurityConfig 里</span></span><br><span class="line">.requestMatchers(<span class="string">&quot;/api/internal/**&quot;</span>).permitAll()</span><br></pre></td></tr></table></figure><p>两套机制职责分离：JWT 管用户认证，X-Internal-Token 管服务间认证。</p><hr><h2 id="结尾：请求的完整旅程"><a href="#结尾：请求的完整旅程" class="headerlink" title="结尾：请求的完整旅程"></a>结尾：请求的完整旅程</h2><p><strong>登录阶段：</strong></p><ol><li>前端发送用户名 + 密码到 <code>/api/auth/login</code></li><li>服务器验证通过后，将 <code>userId</code>、<code>iat</code>（签发时间）、<code>exp</code>（过期时间）写入 payload，base64 编码后与 header 一起用 secret 生成 signature，拼成 <code>header.payload.signature</code> 返回给前端</li><li>前端将 token 存入 localStorage</li></ol><p><strong>后续请求阶段：</strong></p><ol start="4"><li>前端每次请求在 header 中带上 <code>Authorization: Bearer &lt;token&gt;</code></li><li>请求进入 <code>JwtAuthenticationFilter</code>：<ul><li>token 有效 → 解出 userId，封装成 <code>UsernamePasswordAuthenticationToken</code>，存入 <code>SecurityContextHolder</code>，放行</li><li>token 无效&#x2F;过期 → 不登记身份，当作游客放行</li></ul></li><li><code>SecurityConfig</code> 的授权规则判断该路径是否需要登录：<ul><li>需要登录但无身份 → 触发 <code>JwtAuthenticationEntryPoint</code>，返回 <code>&#123;&quot;code&quot;: 401, &quot;msg&quot;: &quot;未登录或 token 无效&quot;&#125;</code></li><li>放行 → 进入 controller</li></ul></li><li>controller 通过 <code>@AuthenticationPrincipal Long userId</code> 直接拿到 userId，Spring 自动从 <code>SecurityContextHolder</code> 注入，无需手动取</li></ol><p>能把这条线自己串起来，JWT + Spring Security 的整条链就真正理解了。</p>]]></content>
+      
+      
+      <categories>
+          
+          <category> 后端 </category>
+          
+      </categories>
+      
+      
+        <tags>
+            
+            <tag> Java </tag>
+            
+            <tag> Spring Security </tag>
+            
+            <tag> JWT </tag>
+            
+            <tag> Spring Boot </tag>
+            
+        </tags>
+      
+    </entry>
+    
+    
+    
+    <entry>
       <title>Hive操作语法</title>
       <link href="/2026/05/02/Hive%E6%93%8D%E4%BD%9C%E8%AF%AD%E6%B3%95/"/>
       <url>/2026/05/02/Hive%E6%93%8D%E4%BD%9C%E8%AF%AD%E6%B3%95/</url>
@@ -22,24 +53,11 @@
             
             <tag> Hive </tag>
             
-            <tag> SQL </tag>
-            
             <tag> 大数据 </tag>
             
+            <tag> 数据仓库 </tag>
+            
         </tags>
-      
-    </entry>
-    
-    
-    
-    <entry>
-      <title>代理搭建Checklist</title>
-      <link href="/2026/04/18/%E4%BB%A3%E7%90%86%E6%90%AD%E5%BB%BAChecklist/"/>
-      <url>/2026/04/18/%E4%BB%A3%E7%90%86%E6%90%AD%E5%BB%BAChecklist/</url>
-      
-        <content type="html"><![CDATA[<div class="video-container">[up主专用，视频内嵌代码贴在这]</div><style>.video-container {    position: relative;    width: 100%;    padding-top: 56.25%; /* 16:9 aspect ratio (height/width = 9/16 * 100%) */}.video-container iframe {    position: absolute;    top: 0;    left: 0;    width: 100%;    height: 100%;}</style>]]></content>
-      
-      
       
     </entry>
     
@@ -66,7 +84,7 @@
             
             <tag> AI </tag>
             
-            <tag> 工具 </tag>
+            <tag> MCP </tag>
             
         </tags>
       
@@ -84,14 +102,18 @@
       
       <categories>
           
-          <category> 数据结构与算法 </category>
+          <category> 算法 </category>
           
       </categories>
       
       
         <tags>
             
-            <tag> 数据结构与算法 </tag>
+            <tag> LeetCode </tag>
+            
+            <tag> 算法 </tag>
+            
+            <tag> 刷题 </tag>
             
         </tags>
       
@@ -107,6 +129,22 @@
         <content type="html"><![CDATA[<h2 id="窗口函数"><a href="#窗口函数" class="headerlink" title="窗口函数"></a>窗口函数</h2><p>窗口函数（Window Function）是在查询结果的“窗口”内 对行做计算，不会把行合并成一条（不像 GROUP BY）。</p><figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br></pre></td><td class="code"><pre><span class="line">函数名(...) <span class="keyword">OVER</span> (</span><br><span class="line">    [<span class="keyword">PARTITION</span> <span class="keyword">BY</span> 列<span class="number">1</span>, 列<span class="number">2</span>, ...]  <span class="comment">-- 分区，相当于每个组内单独计算</span></span><br><span class="line">    [<span class="keyword">ORDER</span> <span class="keyword">BY</span> 列<span class="number">3</span>, 列<span class="number">4</span>, ...]      <span class="comment">-- 窗口内行的顺序</span></span><br><span class="line">    [<span class="keyword">ROWS</span><span class="operator">|</span><span class="keyword">RANGE</span> <span class="keyword">BETWEEN</span> 起点 <span class="keyword">AND</span> 终点]  <span class="comment">-- 窗口框架</span></span><br><span class="line">)</span><br></pre></td></tr></table></figure><p>其中ROWS的关键词有：</p><ul><li>UNBOUNDED PRECEDING:从分区的第一行开始</li><li>N PRECEDING:从当前行前N行开始</li><li>CURRENT ROW:从当前行开始</li><li>N FOLLOWING:从当前行后N行开始</li><li>UNBOUNDED FOLLOWING:分区最后一行</li></ul><h3 id="聚合类"><a href="#聚合类" class="headerlink" title="聚合类"></a>聚合类</h3><figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br></pre></td><td class="code"><pre><span class="line"><span class="built_in">SUM</span>(salary) <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept)    <span class="comment">-- 部门工资总和</span></span><br><span class="line"><span class="built_in">COUNT</span>(<span class="operator">*</span>) <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept)       <span class="comment">-- 部门人数</span></span><br><span class="line"><span class="built_in">AVG</span>(salary) <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept)    <span class="comment">-- 部门平均工资</span></span><br><span class="line"><span class="built_in">MIN</span>(salary) <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept)    <span class="comment">-- 部门最小工资</span></span><br><span class="line"><span class="built_in">MAX</span>(salary) <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept)    <span class="comment">-- 部门最大工资</span></span><br></pre></td></tr></table></figure><h3 id="排序类"><a href="#排序类" class="headerlink" title="排序类"></a>排序类</h3><figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line"><span class="built_in">ROW_NUMBER</span>() <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept <span class="keyword">ORDER</span> <span class="keyword">BY</span> salary <span class="keyword">DESC</span>) <span class="comment">-- 排名1,2,3...</span></span><br><span class="line"><span class="built_in">RANK</span>() <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept <span class="keyword">ORDER</span> <span class="keyword">BY</span> salary <span class="keyword">DESC</span>)       <span class="comment">-- 并列名次</span></span><br><span class="line"><span class="built_in">DENSE_RANK</span>() <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept <span class="keyword">ORDER</span> <span class="keyword">BY</span> salary <span class="keyword">DESC</span>) <span class="comment">-- 并列不空缺</span></span><br><span class="line"><span class="built_in">NTILE</span>(n) <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept <span class="keyword">ORDER</span> <span class="keyword">BY</span> salary <span class="keyword">DESC</span>)     <span class="comment">-- 分成n份</span></span><br></pre></td></tr></table></figure><h3 id="值引用类"><a href="#值引用类" class="headerlink" title="值引用类"></a>值引用类</h3><figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line"><span class="built_in">LAG</span>(salary, <span class="number">1</span>) <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept <span class="keyword">ORDER</span> <span class="keyword">BY</span> salary) <span class="comment">-- 前一行工资</span></span><br><span class="line"><span class="built_in">LEAD</span>(salary, <span class="number">1</span>) <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept <span class="keyword">ORDER</span> <span class="keyword">BY</span> salary) <span class="comment">-- 下一行工资</span></span><br><span class="line"><span class="built_in">FIRST_VALUE</span>(salary) <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept <span class="keyword">ORDER</span> <span class="keyword">BY</span> salary) <span class="comment">-- 窗口第一行</span></span><br><span class="line"><span class="built_in">LAST_VALUE</span>(salary) <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept <span class="keyword">ORDER</span> <span class="keyword">BY</span> salary <span class="keyword">ROWS</span> <span class="keyword">BETWEEN</span> UNBOUNDED PRECEDING <span class="keyword">AND</span> UNBOUNDED FOLLOWING) <span class="comment">-- 窗口最后一行</span></span><br></pre></td></tr></table></figure><h3 id="累计类"><a href="#累计类" class="headerlink" title="累计类"></a>累计类</h3><figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line"><span class="built_in">SUM</span>(salary) <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept <span class="keyword">ORDER</span> <span class="keyword">BY</span> hire_date <span class="keyword">ROWS</span> <span class="keyword">BETWEEN</span> UNBOUNDED PRECEDING <span class="keyword">AND</span> <span class="keyword">CURRENT</span> <span class="type">ROW</span>) <span class="comment">-- 累计工资</span></span><br><span class="line"><span class="built_in">AVG</span>(salary) <span class="keyword">OVER</span> (<span class="keyword">PARTITION</span> <span class="keyword">BY</span> dept <span class="keyword">ORDER</span> <span class="keyword">BY</span> hire_date <span class="keyword">ROWS</span> <span class="keyword">BETWEEN</span> <span class="number">2</span> PRECEDING <span class="keyword">AND</span> <span class="keyword">CURRENT</span> <span class="type">ROW</span>)       <span class="comment">-- 滑动平均</span></span><br></pre></td></tr></table></figure><h2 id="时间函数"><a href="#时间函数" class="headerlink" title="时间函数"></a>时间函数</h2><h2 id="递归RECURSIVE-CTE"><a href="#递归RECURSIVE-CTE" class="headerlink" title="递归RECURSIVE CTE"></a>递归RECURSIVE CTE</h2><p>可以用于递归查询，比如文件夹结构，祖先关系等，也可用于生成一连串数字。</p><figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">WITH</span> <span class="keyword">RECURSIVE</span> cte_name <span class="keyword">AS</span> (</span><br><span class="line">    <span class="comment">-- 1. 基础查询 (Anchor member)</span></span><br><span class="line">    <span class="keyword">SELECT</span> ... <span class="keyword">FROM</span> <span class="keyword">table</span> <span class="keyword">WHERE</span> ... </span><br><span class="line"></span><br><span class="line">    <span class="keyword">UNION</span> [<span class="keyword">ALL</span>]</span><br><span class="line"></span><br><span class="line">    <span class="comment">-- 2. 递归查询 (Recursive member)</span></span><br><span class="line">    <span class="keyword">SELECT</span> ... <span class="keyword">FROM</span> <span class="keyword">table</span></span><br><span class="line">    <span class="keyword">JOIN</span> cte_name <span class="keyword">ON</span> ...</span><br><span class="line">)</span><br><span class="line"><span class="keyword">SELECT</span> <span class="operator">*</span> <span class="keyword">FROM</span> cte_name;</span><br></pre></td></tr></table></figure><figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">/*用于生成1-20的subtask_id*/</span></span><br><span class="line"><span class="keyword">WITH</span> <span class="keyword">RECURSIVE</span> numbers <span class="keyword">AS</span> (</span><br><span class="line">    <span class="keyword">SELECT</span> <span class="number">1</span> <span class="keyword">AS</span> subtask_id</span><br><span class="line">    <span class="keyword">UNION</span> <span class="keyword">ALL</span></span><br><span class="line">    <span class="keyword">SELECT</span> subtask_id <span class="operator">+</span> <span class="number">1</span></span><br><span class="line">    <span class="keyword">FROM</span> numbers</span><br><span class="line">    <span class="keyword">WHERE</span> subtask_id <span class="operator">&lt;</span> <span class="number">20</span></span><br><span class="line">)</span><br><span class="line"></span><br></pre></td></tr></table></figure>]]></content>
       
       
+      <categories>
+          
+          <category> 数据库 </category>
+          
+      </categories>
+      
+      
+        <tags>
+            
+            <tag> SQL </tag>
+            
+            <tag> 窗口函数 </tag>
+            
+            <tag> CTE </tag>
+            
+        </tags>
       
     </entry>
     
@@ -122,14 +160,18 @@
       
       <categories>
           
-          <category> 数据结构与算法 </category>
+          <category> 算法 </category>
           
       </categories>
       
       
         <tags>
             
-            <tag> 数据结构与算法 </tag>
+            <tag> LeetCode </tag>
+            
+            <tag> 算法 </tag>
+            
+            <tag> 动态规划 </tag>
             
         </tags>
       
@@ -147,14 +189,18 @@
       
       <categories>
           
-          <category> 数据结构与算法 </category>
+          <category> 算法 </category>
           
       </categories>
       
       
         <tags>
             
-            <tag> 数据结构与算法 </tag>
+            <tag> 算法 </tag>
+            
+            <tag> 图论 </tag>
+            
+            <tag> 最短路 </tag>
             
         </tags>
       
@@ -172,10 +218,20 @@
       
       <categories>
           
-          <category> 工具(框架)学习 </category>
+          <category> 深度学习 </category>
           
       </categories>
       
+      
+        <tags>
+            
+            <tag> PyTorch </tag>
+            
+            <tag> 深度学习 </tag>
+            
+            <tag> Python </tag>
+            
+        </tags>
       
     </entry>
     
@@ -191,7 +247,7 @@
       
       <categories>
           
-          <category> 工具(框架)学习 </category>
+          <category> 大数据 </category>
           
       </categories>
       
@@ -203,12 +259,6 @@
             <tag> HDFS </tag>
             
             <tag> Yarn </tag>
-            
-            <tag> Hive </tag>
-            
-            <tag> DataGrip </tag>
-            
-            <tag> SQL </tag>
             
         </tags>
       
@@ -226,18 +276,20 @@
       
       <categories>
           
-          <category> 知识总结 </category>
+          <category> 数据库 </category>
           
       </categories>
       
       
         <tags>
             
-            <tag> Mysql </tag>
+            <tag> MySQL </tag>
+            
+            <tag> SQL优化 </tag>
             
             <tag> 索引 </tag>
             
-            <tag> SQL优化 </tag>
+            <tag> 事务 </tag>
             
         </tags>
       
@@ -255,10 +307,20 @@
       
       <categories>
           
-          <category> 知识总结 </category>
+          <category> 工具 </category>
           
       </categories>
       
+      
+        <tags>
+            
+            <tag> Linux </tag>
+            
+            <tag> Shell </tag>
+            
+            <tag> 命令行 </tag>
+            
+        </tags>
       
     </entry>
     
@@ -285,13 +347,9 @@
             
             <tag> Vless </tag>
             
-            <tag> xtls </tag>
-            
             <tag> X-UI </tag>
             
-            <tag> CDN </tag>
-            
-            <tag> TCP拥塞控制算法 </tag>
+            <tag> XTLS </tag>
             
         </tags>
       
@@ -318,19 +376,11 @@
             
             <tag> 网络 </tag>
             
-            <tag> tls </tag>
-            
-            <tag> nginx </tag>
-            
-            <tag> 证书 </tag>
+            <tag> Nginx </tag>
             
             <tag> Vmess </tag>
             
-            <tag> v2ray </tag>
-            
-            <tag> ws </tag>
-            
-            <tag> html </tag>
+            <tag> V2Ray </tag>
             
         </tags>
       
@@ -359,13 +409,9 @@
             
             <tag> Trojan </tag>
             
-            <tag> https </tag>
+            <tag> Nginx </tag>
             
-            <tag> tls </tag>
-            
-            <tag> nginx </tag>
-            
-            <tag> 证书 </tag>
+            <tag> TLS </tag>
             
         </tags>
       
@@ -411,11 +457,9 @@
             
             <tag> 网络 </tag>
             
-            <tag> DNS解析 </tag>
+            <tag> Shadowsocks </tag>
             
-            <tag> shadowsocks </tag>
-            
-            <tag> GFW </tag>
+            <tag> 科学上网 </tag>
             
         </tags>
       
@@ -433,14 +477,18 @@
       
       <categories>
           
-          <category> 数据结构与算法 </category>
+          <category> 算法 </category>
           
       </categories>
       
       
         <tags>
             
-            <tag> 数据结构与算法 </tag>
+            <tag> 算法 </tag>
+            
+            <tag> Python </tag>
+            
+            <tag> 哈希表 </tag>
             
         </tags>
       
@@ -458,7 +506,7 @@
       
       <categories>
           
-          <category> 工具(框架)学习 </category>
+          <category> 工具 </category>
           
       </categories>
       
@@ -466,6 +514,8 @@
         <tags>
             
             <tag> Git </tag>
+            
+            <tag> 版本控制 </tag>
             
         </tags>
       
@@ -483,16 +533,18 @@
       
       <categories>
           
-          <category> NLP </category>
+          <category> 深度学习 </category>
           
       </categories>
       
       
         <tags>
             
-            <tag> NLP </tag>
+            <tag> 深度学习 </tag>
             
-            <tag> Bert </tag>
+            <tag> BERT </tag>
+            
+            <tag> NLP </tag>
             
             <tag> 文本分类 </tag>
             
@@ -512,20 +564,18 @@
       
       <categories>
           
-          <category> Web开发 </category>
+          <category> 建站 </category>
           
       </categories>
       
       
         <tags>
             
-            <tag> Git </tag>
-            
             <tag> Hexo </tag>
             
-            <tag> Node.js </tag>
-            
             <tag> 博客搭建 </tag>
+            
+            <tag> GitHub Pages </tag>
             
         </tags>
       

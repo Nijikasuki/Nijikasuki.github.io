@@ -18,7 +18,7 @@
     card.id = 'hello-card';
     card.innerHTML =
       '<div class="hello-info">' +
-        '<span class="hello-info-line">📚 最近在学：Hadoop · PyTorch</span>' +
+        '<span class="hello-info-line">📚 最近在学：LangGraph</span>' +
         '<span class="hello-info-line hello-hitokoto">✨ 今天也加油哦~</span>' +
       '</div>' +
       '<div class="hello-character-group">' +
